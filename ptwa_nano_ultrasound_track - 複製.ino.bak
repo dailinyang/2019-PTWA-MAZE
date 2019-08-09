@@ -1,0 +1,356 @@
+#include <Wire.h>
+#include <math.h>
+
+/**
+   感應器區 sensor measurement
+*/
+#define RIGHTEYE A0 // Sharp IR GP2Y0A41SK0F (4-30cm, analog)
+#define MIDLEFTEYE A1 // Sharp IR GP2Y0A41SK0F (4-30cm, analog)
+#define MIDRIGHTEYE A4 // Sharp IR GP2Y0A41SK0F (4-30cm, analog)
+#define LEFTEYE A3 // Sharp IR GP2Y0A41SK0F (4-30cm, analog)
+
+const int RIGHT = 0, MID = 1, MIDLEFT = 1, MIDRIGHT = 2, LEFT = 3;
+int sensorValue[4] = {0}; //0=right 1=mid 2= midRight 3=left
+
+/**
+   車子規格區 car measurement
+*/
+const int wd = 1070;//兩輪中心距離 in 1/100cm
+const int carWidth = 1310; // in 1/100cm
+const int carLen = 1180; // in 1/100cm
+
+
+/**
+   速度、距離、PID
+*/
+/*
+  int tP = 170;
+  const float turn90MS = 180.0;//右轉90度所需時間
+  const int pivot = 1250;//前進時要走在離牆多遠的線上 單位:1/100 cm, mm*10
+  float kP = 0.2;
+  float fkP = 0.8;
+  float kD = 0.05;
+  float fkD = 0.3;
+  const float safeDistance = 1000; //tp=200時，看到障礙物到完全煞停的所需距離 用safeDistTest()測
+  const float turnSD = safeDistance + carWidth * 5; //障礙物前煞停+轉90度， 用safeTest()測
+  const float carVec = 620.0;//車子以 tP 前進1秒的距離，mm per seconds
+  const int errMax = int(tP / kP / 2);
+  const int errDeadzone = 100;
+*/
+
+
+int tP = 70;
+const int turn90MS = 410;//轉90度所需時間
+const int pivot = 1700;//前進時要走在離牆多遠的線上 單位:1/100 cm, mm*10 cos(30)=0.866 cos(60)=0.5
+float kP = 0.1;//正比於err造成的轉彎幅度
+float fkP = 0;
+float kD = 0;
+float fkD = 0;
+const int errMax = int(tP/kP/2);//越小則 最大轉彎幅度 越小
+const int errDeadzone = 10; // 1/100 cm
+const float safeDistance = 500; //tp=時，看到障礙物到完全煞停的所需距離 用safeDistTest()測,1/100 cm
+const float turnSD = safeDistance + 300; //障礙物前煞停+轉90度， 用safeTest()測,1/100 cm
+const float carVec = 3000.0;//車子以 tP 前進1秒的距離，1/100cm per second
+
+
+
+
+int err = 0;
+int lastErr = 0;
+int deltaErr = 0;
+
+int ferr = 0;
+int flastErr = 0;
+int fdeltaErr = 0;
+
+/**
+   靠左/右牆
+*/
+//int FOLLOWWALL = LEFT;
+int FOLLOWWALL = RIGHT;
+
+void setup()
+{
+  Serial.begin(115200);
+  pinMode(LEFTEYE, INPUT);
+  pinMode(MIDLEFTEYE, INPUT);
+  pinMode(RIGHTEYE, INPUT);
+  pinMode(MIDRIGHTEYE, INPUT);
+  pinMode(2, OUTPUT);
+  pinMode(3, OUTPUT);
+  pinMode(4, OUTPUT);
+  pinMode(5, OUTPUT);
+
+  (digitalRead(12) == 1) ? FOLLOWWALL = LEFT : FOLLOWWALL = RIGHT;
+
+
+}
+
+void loop()
+{
+  //safeDistTest(1500);//ok
+  //safeTest();//ok
+  //turn90Test(410);//ok
+  //carVecTest();//ok
+  //readSensors();//ok
+  //moveForward();//test PID //ok
+
+
+
+  readSensors();
+  if (sensorValue[MIDLEFT] <= turnSD) {
+    //shiftLaneTo(LEFT);
+    //shiftLaneTo(RIGHT);
+    pingandLeftTurn90();
+    //while (true) brake();
+  }
+  else {
+    moveForward();
+  }
+
+
+
+
+
+  /*
+    //靠牆走
+    //如果遇到障礙物
+    //切換到另一邊牆
+    if (isPathForward()) {
+      moveForward();
+    }
+    else {
+      if (FOLLOWWALL == RIGHT) {
+        brake();
+        //turnLeft();
+        shiftLaneTo(LEFT);
+        FOLLOWWALL = LEFT;
+      }
+      else {
+        brake();
+        //turnRight();
+        shiftLaneTo(RIGHT);
+        FOLLOWWALL = RIGHT;
+      }
+    }
+  */
+}
+/**
+  車子動作區 movement functions
+*/
+/**
+   PD 跟隨左/右牆走
+*/
+void moveForward() {
+  if (FOLLOWWALL == LEFT) {//左手法則
+    //TODO
+    err = pivot -  sensorValue[LEFT] ;
+    deltaErr = err -  lastErr;
+    lastErr = err;
+    motors(int(tP + err * kP + deltaErr * kD + fkP * ferr), int(tP - err * kP - deltaErr * kD - fkP * ferr));
+  }
+  else if (FOLLOWWALL == RIGHT) { //右手法則
+    //TODO
+    err = pivot -  sensorValue[RIGHT];
+    err = crampErr(err);
+    deltaErr = err -  lastErr;
+    lastErr = err;
+
+    /*
+      if (sensorValue[MIDLEFT] <= turnSD) {
+        ferr = turnSD - sensorValue[MIDLEFT]; //range: [turnSD ~ 0]
+        ferr = int(pow(float(ferr),2) / 10);
+        ferr = crampErr(ferr);
+        fdeltaErr = ferr -  flastErr;
+        flastErr = ferr;
+      }
+    */
+    motors(int(tP - err * kP - deltaErr * kD - fkP * ferr - fdeltaErr * fkD), int(tP + err * kP + deltaErr * kD + fkP * ferr + fdeltaErr * fkD));
+  }
+}
+
+int crampErr(int err) {
+  if (err > errDeadzone){
+    err -= errDeadzone;
+    err = min(errMax,err);
+  }
+  else if (err < -errDeadzone) {
+    err += errDeadzone;
+    err = max(-errMax,err);
+  }
+  else err = 0;
+  return err;
+}
+void shiftLaneTo(int LA) {
+  int a; (LA == LEFT) ? a = 1 : a = -1;
+  int v = tP;
+  motorsMs(-v * a, v * a, turn90MS / 2); //轉45度 cos(45) = 0.525
+  motorsMs(v, v, pm2TimeMS(150));//前進 in 1/100cm
+  motorsMs(v * a, -v * a, turn90MS / 1.25); //抵消慣性轉45度
+  //brake();
+}
+void pwmTest() {
+  for (int i = 0; i <= 200; i += 10) {
+    motorsMs(i, i, 1000);
+    brake();
+  }
+}
+void safeDistTest(int dd) { //測safeDistance
+  readSensors();
+  if (sensorValue[MID] <= dd ) while (true) brake();  //TODO 需實測
+  else motors(tP, tP);
+}
+void safeTest() {
+  readSensors();
+  if (sensorValue[MID] <= safeDistance + carWidth * 5 ) { //TODO 需實測
+    motorsMs(-tP, tP, turn90MS * 1.5); //左轉90
+    while (true) brake();
+  }
+  else {
+    motors(tP, tP);
+  }
+}
+void turn90(int dir) {
+  int a;
+  (dir == LEFT) ? a = 1 : a = -1;
+  motorsMs(-a * tP, a * tP, turn90MS);
+}
+void pingandLeftTurn90() {
+  int tt = turn90MS;
+  brake();
+  readSensors();
+  motors(-tP, tP);
+  while (tt > 0 && sensorValue[RIGHT] < pivot*1.5) {
+    if(tt%5==0) readRightEye();
+    tt-=1;
+    delay(1);
+  }
+  brake();
+}
+void turn90Test(int ms) {
+  motorsMs(-tP, tP, ms);
+  while (true) brake();
+}
+void carVecTest() {
+  motorsMs(tP, tP, 1000);
+  while (true) brake();
+}
+float pm2TimeMS(float s) {//s in 1/100 cm
+  float error = 200.0;//實測誤差約少20mm
+  return (s + error) / carVec * 1000;
+}
+/**
+   馬達函數 motor functions
+*/
+/**
+   motorsMs(左馬達出力, 右馬達出力, 持續毫秒數)
+   函數執行完畢，馬達狀態會維持住，除非呼叫其他馬達函數。
+*/
+void motorsMs(int L, int R, int ms) {
+  motors(L, R);
+  delay(ms);
+}
+
+/**
+   motors(左馬達出力, 右馬達出力)
+   函數執行完畢，馬達狀態會維持住，除非呼叫其他馬達函數。
+*/
+void motors(int L, int R) {
+  /*
+  Serial.print(L);
+  Serial.print(" --- ");
+  Serial.println(R);
+  */
+  int bias = 0;
+  digitalWrite(4, L >= 0 ? 0 : 1);
+  analogWrite(5, L >= 0 ? min(L, 255) : min(255 + L, 255));
+  digitalWrite(2, R >= 0 ? 0 : 1);
+  analogWrite(3, R >= 0 ? min(R - bias, 255) : min(255 + R - bias, 255));
+}
+
+/**
+   馬達不出力，滑行n毫秒
+*/
+void coast(int n) {
+  digitalWrite(2, 0);
+  analogWrite(3, 0);
+  digitalWrite(4, 0);
+  analogWrite(5, 0);
+  delay(n);
+}
+
+/*
+   馬達煞停，會有立即的停頓感
+*/
+void brake() {
+  /*
+    digitalWrite(2, 1);
+    analogWrite(3, 1);
+    digitalWrite(4, 1);
+    analogWrite(5, 1);
+  */
+
+  digitalWrite(2, 1);
+  analogWrite(3, 255);
+  digitalWrite(4, 1);
+  analogWrite(5, 255);
+  //delay(2);
+
+}
+
+
+/**
+   感測器區sensor functions
+*/
+/**
+   讀第 i 個 存到感測器陣列備用
+*/
+void readSensors() {
+  /*int sampleTimes = 6;
+    for (int i = 0; i < 4; i++) {
+    for(int j =0;j<sampleTimes;j++){
+      //sensorValue[i] = (analogRead(i) + sensorValue[i] ) / 2; ////0=right 1=midleft 2= midRight 3=left
+    }
+    }
+    for (int i = 0; i < 4; i++) {
+    sensorValue[i] = VtoCentM(sensorValue[i]);
+    }*/
+  sensorValue[RIGHT] = getDistanceCentCM((analogRead(RIGHTEYE) + analogRead(RIGHTEYE)) / 2);
+  sensorValue[MIDRIGHT] = getDistanceCentCM((analogRead(MIDRIGHTEYE) + analogRead(MIDRIGHTEYE)) / 2);
+  sensorValue[MIDLEFT] = getDistanceCentCM((analogRead(MIDLEFTEYE) + analogRead(MIDLEFTEYE)) / 2);
+  sensorValue[LEFT] = getDistanceCentCM((analogRead(LEFTEYE) + analogRead(LEFTEYE)) / 2);
+  
+  Serial.print(sensorValue[LEFT]); Serial.print(",");
+  Serial.print(sensorValue[MIDLEFT]); Serial.print(",");
+  Serial.print(sensorValue[MIDRIGHT]); Serial.print(",");
+  Serial.println(sensorValue[RIGHT]);
+  
+}
+void readRightEye(){
+  sensorValue[RIGHT] = getDistanceCentCM(analogRead(RIGHTEYE));
+}
+int VtoCentM(int ana) {
+  float volts = ana * 0.0048828125; // value from sensor * (5/1024)
+  float distance = 13 * pow(volts, -1) * 100; // worked out from datasheet graph
+  if (distance <= 3000) return int(distance);
+  else return 3000;
+}
+int getDistanceCentCM(int v){  //reference: https://github.com/jeroendoggen/Arduino-distance-sensor-library
+  int adcValue=v;
+  if (adcValue > 600)                             // lower boundary: 4 cm (3 cm means under the boundary)
+  {
+    return (3*100);
+  }
+
+  if (adcValue < 80 )                             //upper boundary: 36 cm (returning 37 means over the boundary)
+  {
+    return (37*100);
+  }
+
+  else
+  {
+    //return (1 / (0.000413153 * adcValue - 0.0055266887))*100;
+    return (1 / (0.000413153 * adcValue - 0.0055266887))*100;
+  }
+}
+
